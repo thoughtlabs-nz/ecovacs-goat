@@ -586,15 +586,56 @@ class EcovacsMowerApi:
             "content-type": "application/json",
             "user-agent": "okhttp/4.9.1",
         }
-        try:
-            async with self._session.post(
-                url, json=body, headers=headers, timeout=TIMEOUT
-            ) as response:
-                response.raise_for_status()
-                result: dict[str, Any] = await response.json(content_type=None)
-        except ClientError as err:
-            raise EcovacsApiError("SST token request failed") from err
-        token = result["data"]["data"]["token"]
+        token: str | None = None
+        for attempt in range(2):
+            try:
+                async with self._session.post(
+                    url, json=body, headers=headers, timeout=TIMEOUT
+                ) as response:
+                    status = response.status
+                    text = await response.text()
+            except ClientError as err:
+                _LOGGER.warning("ECOVACS SST token request to %s failed: %r", url, err)
+                raise EcovacsApiError(f"SST token request failed: {err!r}") from err
+
+            _LOGGER.debug(
+                "ECOVACS SST token response HTTP %s: %s", status, text[:500]
+            )
+            if status in (401, 403) and attempt == 0:
+                # The portal token can be revoked server-side before its local
+                # expiry (e.g. after an app login). Refresh it once and retry.
+                _LOGGER.warning(
+                    "ECOVACS SST token request rejected (HTTP %s: %s); "
+                    "refreshing login and retrying",
+                    status,
+                    text[:300],
+                )
+                credentials = await self.authenticate(force=True)
+                body["sub"] = credentials.user_id
+                headers["authorization"] = f"Bearer {credentials.token}"
+                continue
+            if status >= 400:
+                _LOGGER.warning(
+                    "ECOVACS SST token request to %s failed: HTTP %s: %s",
+                    url,
+                    status,
+                    text[:500],
+                )
+                raise EcovacsApiError(
+                    f"SST token request failed: HTTP {status}: {text[:200]}"
+                )
+            try:
+                token = str(json.loads(text)["data"]["data"]["token"])
+            except (ValueError, KeyError, TypeError) as err:
+                _LOGGER.warning(
+                    "ECOVACS SST token response had no token: %s", text[:500]
+                )
+                raise EcovacsApiError(
+                    f"SST token request failed: unexpected response: {text[:200]}"
+                ) from err
+            break
+        if token is None:
+            raise EcovacsApiError("SST token request failed after login refresh")
         cached = SstToken(token=token, expires_at=time.time() + 540)
         self._sst[device.did] = cached
         return cached
