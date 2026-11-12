@@ -1753,3 +1753,798 @@ if (!customElements.get("ecovacs-goat-card")) {
     description: "Control an ECOVACS GOAT mower with explicit start, stop, dock, and live-map keepalive buttons.",
   });
 }
+
+// ---------------------------------------------------------------------------
+// Ecovacs GOAT Card v2
+// ---------------------------------------------------------------------------
+// A second card type (`custom:ecovacs-goat-card-v2`) built on the card above.
+// It reuses the map model and the action/retry logic and replaces the view:
+// it builds its DOM once and patches it in place (keyboard focus survives
+// state updates), finds the mower's entities itself, asks before ending a
+// job, and adds map zoom/pan, a cut-direction slider and translated labels.
+//
+// YAML usage (only `entity` is needed; the rest is derived from its device):
+//   type: custom:ecovacs-goat-card-v2
+//   entity: lawn_mower.ecovacs_goat_1
+
+// Config key -> [domain, entity id suffix] of the mower's sibling entities.
+const V2_SIBLINGS = {
+  battery_entity: ["sensor", "battery_level"],
+  area_entity: ["sensor", "mowing_area"],
+  progress_entity: ["sensor", "mowing_progress"],
+  error_entity: ["sensor", "error"],
+  map_entity: ["sensor", "live_map"],
+  direction_entity: ["number", "cut_direction"],
+  stop_button: ["button", "end_mowing"],
+};
+const V2_CONFIRM_END_MS = 4000;
+const V2_MAX_ZOOM = 6;
+const V2_ZOOM_STEP = 1.5;
+const V2_DIRECTION_PRESETS = [0, 45, 90, 135, 180];
+
+// Keyed by the English text; `{n}` stands for any number in the message.
+const V2_STRINGS = {
+  de: {
+    Mower: "Mäher",
+    "Mowing area": "Mähfläche",
+    Progress: "Fortschritt",
+    Battery: "Akku",
+    Start: "Start",
+    Pause: "Pause",
+    Resume: "Fortsetzen",
+    End: "Beenden",
+    "Confirm end": "Wirklich beenden",
+    "Tap again to end mowing": "Zum Beenden erneut tippen",
+    Dock: "Zur Station",
+    "Cancel Dock": "Rückkehr abbrechen",
+    "Live map": "Live-Karte",
+    "Keep fast map updates on for {n} minutes":
+      "Schnelle Kartenaktualisierung für {n} Minuten aktivieren",
+    "Cut direction": "Schnittrichtung",
+    Unknown: "Unbekannt",
+    Unavailable: "Nicht verfügbar",
+    Idle: "Inaktiv",
+    "Waiting for live map data": "Warte auf Live-Kartendaten",
+    "Live mower map": "Live-Karte des Mähers",
+    "Entity not found: {e}": "Entität nicht gefunden: {e}",
+    "Zoom in": "Vergrößern",
+    "Zoom out": "Verkleinern",
+    "Reset view": "Ansicht zurücksetzen",
+    "Follow mower": "Mäher folgen",
+    "Mower did not start mowing.": "Der Mäher hat nicht mit dem Mähen begonnen.",
+    "Mower did not pause.": "Der Mäher hat nicht pausiert.",
+    "Mower did not end mowing.": "Der Mäher hat das Mähen nicht beendet.",
+    "Mower did not start returning to dock.":
+      "Der Mäher ist nicht zur Station zurückgekehrt.",
+    "Mower did not cancel docking.": "Der Mäher hat die Rückkehr nicht abgebrochen.",
+    "Could not start mower keepalive.":
+      "Die Live-Karte konnte nicht gestartet werden.",
+    "Cut direction did not change to {n} degrees.":
+      "Die Schnittrichtung wurde nicht auf {n} Grad geändert.",
+    "Could not set cut direction to {n} degrees.":
+      "Die Schnittrichtung konnte nicht auf {n} Grad gesetzt werden.",
+  },
+  fr: {
+    Mower: "Tondeuse",
+    "Mowing area": "Surface tondue",
+    Progress: "Progression",
+    Battery: "Batterie",
+    Start: "Démarrer",
+    Pause: "Pause",
+    Resume: "Reprendre",
+    End: "Terminer",
+    "Confirm end": "Confirmer l'arrêt",
+    "Tap again to end mowing": "Appuyez à nouveau pour terminer la tonte",
+    Dock: "Retour base",
+    "Cancel Dock": "Annuler le retour",
+    "Live map": "Carte en direct",
+    "Keep fast map updates on for {n} minutes":
+      "Activer les mises à jour rapides de la carte pendant {n} minutes",
+    "Cut direction": "Direction de coupe",
+    Unknown: "Inconnu",
+    Unavailable: "Indisponible",
+    Idle: "Inactif",
+    "Waiting for live map data": "En attente des données de la carte",
+    "Live mower map": "Carte en direct de la tondeuse",
+    "Entity not found: {e}": "Entité introuvable : {e}",
+    "Zoom in": "Zoom avant",
+    "Zoom out": "Zoom arrière",
+    "Reset view": "Réinitialiser la vue",
+    "Follow mower": "Suivre la tondeuse",
+    "Mower did not start mowing.": "La tondeuse n'a pas démarré la tonte.",
+    "Mower did not pause.": "La tondeuse ne s'est pas mise en pause.",
+    "Mower did not end mowing.": "La tondeuse n'a pas terminé la tonte.",
+    "Mower did not start returning to dock.":
+      "La tondeuse n'est pas retournée à la base.",
+    "Mower did not cancel docking.": "La tondeuse n'a pas annulé le retour.",
+    "Could not start mower keepalive.": "Impossible de démarrer la carte en direct.",
+    "Cut direction did not change to {n} degrees.":
+      "La direction de coupe n'est pas passée à {n} degrés.",
+    "Could not set cut direction to {n} degrees.":
+      "Impossible de régler la direction de coupe sur {n} degrés.",
+  },
+  nl: {
+    Mower: "Maaier",
+    "Mowing area": "Gemaaid oppervlak",
+    Progress: "Voortgang",
+    Battery: "Batterij",
+    Start: "Start",
+    Pause: "Pauze",
+    Resume: "Hervatten",
+    End: "Beëindigen",
+    "Confirm end": "Bevestig stoppen",
+    "Tap again to end mowing": "Tik nogmaals om het maaien te beëindigen",
+    Dock: "Naar station",
+    "Cancel Dock": "Terugkeer annuleren",
+    "Live map": "Live kaart",
+    "Keep fast map updates on for {n} minutes":
+      "Snelle kaartupdates {n} minuten inschakelen",
+    "Cut direction": "Maairichting",
+    Unknown: "Onbekend",
+    Unavailable: "Niet beschikbaar",
+    Idle: "Inactief",
+    "Waiting for live map data": "Wachten op live kaartgegevens",
+    "Live mower map": "Live kaart van de maaier",
+    "Entity not found: {e}": "Entiteit niet gevonden: {e}",
+    "Zoom in": "Inzoomen",
+    "Zoom out": "Uitzoomen",
+    "Reset view": "Weergave herstellen",
+    "Follow mower": "Maaier volgen",
+    "Mower did not start mowing.": "De maaier is niet begonnen met maaien.",
+    "Mower did not pause.": "De maaier is niet gepauzeerd.",
+    "Mower did not end mowing.": "De maaier heeft het maaien niet beëindigd.",
+    "Mower did not start returning to dock.":
+      "De maaier is niet teruggekeerd naar het station.",
+    "Mower did not cancel docking.": "De maaier heeft de terugkeer niet geannuleerd.",
+    "Could not start mower keepalive.": "De live kaart kon niet worden gestart.",
+    "Cut direction did not change to {n} degrees.":
+      "De maairichting is niet gewijzigd naar {n} graden.",
+    "Could not set cut direction to {n} degrees.":
+      "De maairichting kon niet op {n} graden worden ingesteld.",
+  },
+};
+
+// The card renders in light DOM, so every rule is scoped to the element name.
+const V2_STYLE = `
+  ecovacs-goat-card-v2 [hidden] {
+    display: none !important;
+  }
+  ecovacs-goat-card-v2 button:focus-visible,
+  ecovacs-goat-card-v2 input:focus-visible,
+  ecovacs-goat-card-v2 .map-wrap:focus-visible {
+    outline: 2px solid var(--primary-color);
+    outline-offset: 2px;
+  }
+  ecovacs-goat-card-v2 .warning {
+    padding: 8px 0 0;
+    overflow-wrap: anywhere;
+  }
+  ecovacs-goat-card-v2 .map-wrap {
+    position: relative;
+    border-radius: 12px;
+  }
+  ecovacs-goat-card-v2 .map-tools {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  ecovacs-goat-card-v2 .map-tools button {
+    width: 40px;
+    min-height: 40px;
+    background: var(--card-background-color, #fff);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+    --mdc-icon-size: 20px;
+  }
+  ecovacs-goat-card-v2 button[aria-pressed="true"] {
+    background: var(--primary-color);
+    color: var(--text-primary-color);
+  }
+  ecovacs-goat-card-v2 button.stop.confirm {
+    outline: 3px solid var(--error-color, #d32f2f);
+    outline-offset: 2px;
+    font-weight: 700;
+  }
+  ecovacs-goat-card-v2 input[type="range"] {
+    display: block;
+    width: 100%;
+    min-height: 32px;
+    margin: 0 0 8px;
+    accent-color: var(--primary-color);
+  }
+  ecovacs-goat-card-v2 .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    ecovacs-goat-card-v2 button {
+      transition: none;
+    }
+    ecovacs-goat-card-v2 button.pending::after {
+      animation: none;
+    }
+  }
+`;
+
+class EcovacsGoatCardV2 extends EcovacsGoatCard {
+  static getStubConfig(hass) {
+    return { entity: EcovacsGoatCardV2._findMower(hass) || DEFAULT_CONFIG.entity };
+  }
+
+  static _findMower(hass) {
+    const registered = Object.values(hass?.entities || {}).find(
+      (entry) =>
+        entry.platform === "ecovacs_goat_g1" && entry.entity_id.startsWith("lawn_mower.")
+    );
+    return (
+      registered?.entity_id ||
+      Object.keys(hass?.states || {}).find((id) => id.startsWith("lawn_mower."))
+    );
+  }
+
+  setConfig(config) {
+    super.setConfig(config);
+    this._userConfig = config || {};
+    // The old card's defaults point at a file most installs do not have and at
+    // a fixed name that hides the mower's own friendly name.
+    if (!this._userConfig.map_static_url) {
+      this.config.map_static_url = "";
+    }
+    if (!this._userConfig.name) {
+      this.config.name = "";
+    }
+    this._resolved = false;
+    this._els = null;
+    if (this._hass) {
+      this._resolveEntities();
+      this.render();
+    }
+  }
+
+  set hass(hass) {
+    this._hass = hass;
+    this._resolveEntities();
+    super.hass = hass;
+  }
+
+  disconnectedCallback() {
+    super.disconnectedCallback();
+    this._cancelConfirmEnd();
+  }
+
+  getCardSize() {
+    return 7;
+  }
+
+  // Fill in every entity the user did not configure from the mower's device.
+  _resolveEntities() {
+    if (this._resolved || !this._hass || !this.config) {
+      return;
+    }
+    const hass = this._hass;
+    const user = this._userConfig;
+    if (!user.entity) {
+      this.config.entity = EcovacsGoatCardV2._findMower(hass) || this.config.entity;
+    }
+    const entity = this.config.entity;
+    const objectId = String(entity).split(".")[1] || "";
+    const deviceId = hass.entities?.[entity]?.device_id;
+    const registry = Object.values(hass.entities || {});
+    for (const [key, [domain, suffix]] of Object.entries(V2_SIBLINGS)) {
+      if (user[key] !== undefined) {
+        continue;
+      }
+      const guess = `${domain}.${objectId}_${suffix}`;
+      const sibling = hass.states[guess]
+        ? guess
+        : registry.find(
+            (entry) =>
+              deviceId &&
+              entry.device_id === deviceId &&
+              entry.entity_id.startsWith(`${domain}.`) &&
+              entry.entity_id.endsWith(`_${suffix}`)
+          )?.entity_id;
+      this.config[key] = sibling || guess;
+    }
+    // Keep retrying until the mower exists: at startup the registry is empty.
+    this._resolved = !!hass.states[entity];
+  }
+
+  _t(text, vars = {}) {
+    const language = String(
+      this._hass?.locale?.language || this._hass?.language || "en"
+    ).split("-")[0];
+    const numbers = [];
+    const key = String(text).replace(/-?\d+/g, (number) => {
+      numbers.push(number);
+      return "{n}";
+    });
+    return (V2_STRINGS[language]?.[key] ?? key)
+      .replace(/\{n\}/g, () => numbers.shift() ?? "")
+      .replace(/\{(\w+)\}/g, (match, name) => vars[name] ?? match);
+  }
+
+  _stateLabel(state, meta) {
+    return (
+      this._hass.localize?.(`component.lawn_mower.entity_component._.state.${state}`) ||
+      this._t(meta.label)
+    );
+  }
+
+  _nonMapSignature() {
+    return (
+      super._nonMapSignature() +
+      JSON.stringify([
+        this._hass?.locale?.language,
+        !!this._state(this.config.map_entity),
+        !!this._state(this.config.stop_button),
+      ])
+    );
+  }
+
+  _build() {
+    const metric = (key) => `
+      <div class="metric">
+        <div class="label" data-el="${key}-label"></div>
+        <div class="value" data-el="${key}"></div>
+      </div>`;
+    const tool = (key, icon) =>
+      `<button type="button" data-map="${key}"><ha-icon icon="${icon}"></ha-icon></button>`;
+    const action = (key, cls = "") =>
+      `<button type="button" class="${cls}" data-el="${key}"><ha-icon></ha-icon><span></span></button>`;
+    this.innerHTML = `
+      <ha-card>
+        <style>${STYLE}${V2_STYLE}</style>
+        <div class="header">
+          <div class="title">
+            <ha-icon icon="mdi:robot-mower-outline"></ha-icon>
+            <h2 data-el="name"></h2>
+          </div>
+          <div class="chip" data-el="chip" role="status"><ha-icon></ha-icon><span></span></div>
+        </div>
+        <div class="warning" data-el="missing" role="alert" hidden></div>
+        <div class="summary">${metric("area")}${metric("progress")}${metric("battery")}</div>
+        <div class="error-line" data-el="error" role="alert" hidden>
+          <ha-icon icon="mdi:alert-circle"></ha-icon><span></span>
+        </div>
+        <div class="map-wrap" data-el="map" tabindex="0" role="group">
+          <div class="map-slot"></div>
+          <div class="map-tools" data-el="tools" hidden>
+            ${tool("in", "mdi:plus")}${tool("out", "mdi:minus")}
+            ${tool("reset", "mdi:fit-to-screen-outline")}${tool("follow", "mdi:crosshairs-gps")}
+          </div>
+        </div>
+        <div class="actions">
+          ${action("primary")}${action("end", "stop")}${action("dock")}${action("live")}
+        </div>
+        <div class="direction" data-el="direction" hidden>
+          <div class="direction-header">
+            <span data-el="direction-label"></span>
+            <span class="direction-value" data-el="direction-value"></span>
+          </div>
+          <input type="range" data-el="slider" />
+          <div class="direction-presets">
+            ${V2_DIRECTION_PRESETS.map(
+              (angle) => `<button type="button" data-direction="${angle}">${angle}°</button>`
+            ).join("")}
+          </div>
+        </div>
+        <div class="sr-only" data-el="announce" aria-live="polite"></div>
+      </ha-card>
+    `;
+    this._els = {};
+    this.querySelectorAll("[data-el]").forEach((el) => {
+      this._els[el.dataset.el] = el;
+    });
+    this._els.end.dataset.action = "end";
+    this._els.live.dataset.action = "keepalive";
+    // The slot is empty again, so the map must be drawn from scratch.
+    this._lastMapDataSignature = undefined;
+    this._lastMapStructureSignature = null;
+
+    if (!this._clickHandler) {
+      this._clickHandler = (event) => this._onClick(event);
+      this.addEventListener("click", this._clickHandler);
+    }
+    const slider = this._els.slider;
+    slider.addEventListener("input", () => {
+      this._sliding = true;
+      this._els["direction-value"].textContent = `${slider.value}°`;
+    });
+    slider.addEventListener("change", () => {
+      this._sliding = false;
+      this._runDirectionAction(Number(slider.value));
+    });
+    this._setupMapPanning(this._els.map);
+  }
+
+  render() {
+    if (!this.config || !this._hass) {
+      return;
+    }
+    if (!this._els) {
+      this._build();
+    }
+    const els = this._els;
+    const mower = this._state(this.config.entity);
+    const state = this._displayState(mower?.state || "unavailable");
+    const meta = STATE_META[state] || {
+      label: this._label(state),
+      className: "muted",
+      icon: "mdi:robot-mower-outline",
+    };
+    const unavailable = !mower || state === "unavailable";
+    const returning = state === "returning";
+    const mowing = state === "mowing";
+    const paused = state === "paused";
+
+    this._text(els.name, this.config.name || this._friendlyName(mower) || this._t("Mower"));
+    els.chip.className = `chip ${meta.className}${this._pendingAction ? " pending" : ""}`;
+    this._attr(els.chip.querySelector("ha-icon"), "icon", meta.icon);
+    this._text(els.chip.querySelector("span"), this._stateLabel(state, meta));
+
+    const missing = ["entity", ...Object.keys(V2_SIBLINGS)]
+      .map((key) => this.config[key])
+      .filter((id) => id && !this._hass.states[id]);
+    els.missing.hidden = !missing.length;
+    this._text(
+      els.missing,
+      missing.length ? this._t("Entity not found: {e}", { e: missing.join(", ") }) : ""
+    );
+
+    const metrics = {
+      area: ["Mowing area", this._formatAreaState(this._state(this.config.area_entity))],
+      progress: ["Progress", this._formatRoundedState(this._state(this.config.progress_entity))],
+      battery: ["Battery", this._formatState(this._state(this.config.battery_entity))],
+    };
+    for (const [key, [label, value]] of Object.entries(metrics)) {
+      this._text(els[`${key}-label`], this._t(label));
+      this._html(els[key], this._t(value));
+    }
+
+    const error = this._state(this.config.error_entity);
+    const showError =
+      !!error && !["unknown", "unavailable", "0", "100"].includes(error.state);
+    els.error.hidden = !showError;
+    if (showError) {
+      const description = error.attributes?.description;
+      this._html(
+        els.error.querySelector("span"),
+        `${this._formatState(error)}${description ? ` - ${this._escape(description)}` : ""}`
+      );
+    }
+
+    const confirming = this._confirmEndUntil > Date.now();
+    this._button(els.primary, {
+      action: mowing ? "pause" : "start",
+      cls: mowing ? "pause" : "primary",
+      icon: mowing ? "mdi:pause" : "mdi:play",
+      label: this._t(mowing ? "Pause" : paused ? "Resume" : "Start"),
+      disabled: unavailable || returning,
+    });
+    this._button(els.end, {
+      cls: confirming ? "stop confirm" : "stop",
+      icon: confirming ? "mdi:alert" : "mdi:stop",
+      label: this._t(confirming ? "Confirm end" : "End"),
+      disabled: unavailable || returning || (!mowing && !paused && state !== "error"),
+    });
+    this._button(els.dock, {
+      action: returning ? "cancel_dock" : "dock",
+      icon: returning ? "mdi:home-export-outline" : "mdi:home-import-outline",
+      label: this._t(returning ? "Cancel Dock" : "Dock"),
+      disabled: unavailable || state === "docked",
+    });
+    this._updateKeepaliveButton();
+    this._renderDirection(unavailable);
+
+    this._attr(els.map, "aria-label", this._t("Live mower map"));
+    for (const [key, label] of [
+      ["in", "Zoom in"],
+      ["out", "Zoom out"],
+      ["reset", "Reset view"],
+      ["follow", "Follow mower"],
+    ]) {
+      const button = this.querySelector(`[data-map="${key}"]`);
+      this._attr(button, "aria-label", this._t(label));
+      this._attr(button, "title", this._t(label));
+    }
+
+    this._nonMapSignatureValue = this._nonMapSignature();
+    this._updateMapOnly();
+  }
+
+  _renderDirection(unavailable) {
+    const els = this._els;
+    const direction = this._state(this.config.direction_entity);
+    els.direction.hidden = !direction;
+    if (!direction) {
+      return;
+    }
+    const value = Number(direction.state);
+    const pending =
+      this._pendingAction?.type === "direction" ? this._pendingAction.expectedValue : null;
+    const display = Number.isFinite(pending)
+      ? pending
+      : Number.isFinite(value)
+        ? Math.round(value)
+        : null;
+    const label = this._t("Cut direction");
+    this._text(els["direction-label"], label);
+    const slider = els.slider;
+    this._attr(slider, "aria-label", label);
+    this._attr(slider, "min", direction.attributes?.min ?? 0);
+    this._attr(slider, "max", direction.attributes?.max ?? 180);
+    this._attr(slider, "step", direction.attributes?.step ?? 1);
+    slider.disabled = unavailable;
+    if (!this._sliding) {
+      slider.value = display ?? 90;
+      this._text(els["direction-value"], display === null ? this._t("Unknown") : `${display}°`);
+    }
+    this._attr(slider, "aria-valuetext", `${slider.value}°`);
+    this.querySelectorAll("[data-direction]").forEach((button) => {
+      const angle = Number(button.dataset.direction);
+      const busy = this._pendingAction?.key === `direction-${angle}`;
+      button.className = [display === angle ? "selected" : "", busy ? "pending" : ""]
+        .filter(Boolean)
+        .join(" ");
+      button.disabled = unavailable;
+      this._attr(button, "aria-pressed", display === angle);
+      this._attr(button, "aria-busy", busy);
+    });
+  }
+
+  _button(el, { action, cls = "", icon, label, disabled }) {
+    if (action) {
+      el.dataset.action = action;
+    }
+    el.className = this._buttonClass(cls, el.dataset.action);
+    el.disabled = !!disabled;
+    this._attr(el, "aria-busy", this._pendingAction?.key === el.dataset.action);
+    this._attr(el.querySelector("ha-icon"), "icon", icon);
+    this._text(el.querySelector("span"), label);
+  }
+
+  _updateKeepaliveButton() {
+    const button = this._els?.live;
+    if (!button) {
+      return;
+    }
+    const remaining = this._keepaliveRemainingSeconds();
+    const active = remaining > 0;
+    const hint = this._t(
+      `Keep fast map updates on for ${KEEPALIVE_DURATION_SECONDS / 60} minutes`
+    );
+    button.className = this._buttonClass("", "keepalive");
+    this._attr(button, "aria-pressed", active);
+    this._attr(button, "title", hint);
+    this._attr(button, "aria-label", `${this._t("Live map")}. ${hint}`);
+    this._attr(
+      button.querySelector("ha-icon"),
+      "icon",
+      active ? "mdi:timer-sand" : "mdi:map-marker-path"
+    );
+    this._text(
+      button.querySelector("span"),
+      active ? this._formatKeepaliveRemaining(remaining) : this._t("Live map")
+    );
+  }
+
+  _text(el, text) {
+    if (el.textContent !== text) {
+      el.textContent = text;
+    }
+  }
+
+  // For values the base formatters already HTML-escaped.
+  _html(el, html) {
+    if (el._lastHtml !== html) {
+      el._lastHtml = html;
+      el.innerHTML = html;
+    }
+  }
+
+  _attr(el, name, value) {
+    if (el && el.getAttribute(name) !== String(value)) {
+      el.setAttribute(name, String(value));
+    }
+  }
+
+  _onClick(event) {
+    const button = event.target.closest?.("button");
+    if (!button || button.disabled || !this.contains(button)) {
+      return;
+    }
+    const { action, direction, map } = button.dataset;
+    if (action === "keepalive") {
+      this._runKeepaliveAction();
+    } else if (action === "end") {
+      this._confirmEnd();
+    } else if (action) {
+      this._runStateAction(action);
+    } else if (direction !== undefined) {
+      this._runDirectionAction(Number(direction));
+    } else if (map) {
+      this._mapTool(map);
+    }
+  }
+
+  // Ending a job cannot be undone, so the first press only arms the button.
+  _confirmEnd() {
+    if (this._confirmEndUntil > Date.now()) {
+      this._cancelConfirmEnd();
+      this._runStateAction("end");
+      return;
+    }
+    this._confirmEndUntil = Date.now() + V2_CONFIRM_END_MS;
+    this._confirmEndTimer = window.setTimeout(() => {
+      this._cancelConfirmEnd();
+      this.render();
+    }, V2_CONFIRM_END_MS);
+    this._els.announce.textContent = this._t("Tap again to end mowing");
+    this.render();
+  }
+
+  _cancelConfirmEnd() {
+    window.clearTimeout(this._confirmEndTimer);
+    this._confirmEndUntil = 0;
+    if (this._els) {
+      this._els.announce.textContent = "";
+    }
+  }
+
+  _showToast(message) {
+    super._showToast(this._t(message));
+  }
+
+  // --- Map zoom, pan and follow -------------------------------------------
+
+  _computeMapRender(resolved, mowerState) {
+    const render = super._computeMapRender(resolved, mowerState);
+    this._mapRender = render;
+    return render;
+  }
+
+  _mowerMarkerAnimation(...args) {
+    // Always call the base so it keeps tracking the previous position.
+    const animation = super._mowerMarkerAnimation(...args);
+    return window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ? "" : animation;
+  }
+
+  _updateMapOnly() {
+    super._updateMapOnly();
+    this._applyMapView();
+  }
+
+  _applyMapView() {
+    if (!this._els) {
+      return;
+    }
+    const svg = this.querySelector(".map-slot svg");
+    this._els.tools.hidden = !svg;
+    const empty = this.querySelector(".map-slot .map-empty");
+    if (empty) {
+      this._text(empty, this._t("Waiting for live map data"));
+    }
+    const render = this._mapRender;
+    if (!svg || !render?.width) {
+      return;
+    }
+    this._attr(svg, "aria-label", this._t("Live mower map"));
+    const { width, height, currentPoint } = render;
+    const zoom = this._zoom || 1;
+    if (this._follow && currentPoint) {
+      this._center = { x: currentPoint.x, y: currentPoint.y };
+    }
+    const viewWidth = width / zoom;
+    const viewHeight = height / zoom;
+    const center = this._center || { x: width / 2, y: height / 2 };
+    const clamp = (value, max) => Math.min(Math.max(value, 0), max);
+    const x = clamp(center.x - viewWidth / 2, width - viewWidth);
+    const y = clamp(center.y - viewHeight / 2, height - viewHeight);
+    this._center = { x: x + viewWidth / 2, y: y + viewHeight / 2 };
+    this._attr(svg, "viewBox", `${x} ${y} ${viewWidth} ${viewHeight}`);
+    // Only take over touch gestures once zoomed, so the page still scrolls.
+    svg.style.touchAction = zoom > 1 ? "none" : "";
+    svg.style.cursor = zoom > 1 ? "grab" : "";
+
+    const tool = (key) => this.querySelector(`[data-map="${key}"]`);
+    tool("in").disabled = zoom >= V2_MAX_ZOOM;
+    tool("out").disabled = zoom <= 1;
+    tool("reset").disabled = zoom <= 1 && !this._follow;
+    this._attr(tool("follow"), "aria-pressed", !!this._follow);
+  }
+
+  _mapTool(kind) {
+    const zoom = this._zoom || 1;
+    if (kind === "in") {
+      this._zoom = Math.min(V2_MAX_ZOOM, zoom * V2_ZOOM_STEP);
+    } else if (kind === "out") {
+      const next = zoom / V2_ZOOM_STEP;
+      this._zoom = next < 1.05 ? 1 : next;
+    } else if (kind === "reset") {
+      this._zoom = 1;
+      this._follow = false;
+      this._center = null;
+    } else if (kind === "follow") {
+      this._follow = !this._follow;
+      if (this._follow && zoom <= 1) {
+        this._zoom = 3;
+      }
+    }
+    this._applyMapView();
+  }
+
+  _panMap(dx, dy) {
+    if ((this._zoom || 1) <= 1 || !this._center) {
+      return;
+    }
+    this._follow = false;
+    this._center = { x: this._center.x + dx, y: this._center.y + dy };
+    this._applyMapView();
+  }
+
+  _setupMapPanning(wrap) {
+    let last = null;
+    wrap.addEventListener("pointerdown", (event) => {
+      const svg = event.target.closest?.("svg");
+      if (!svg || (this._zoom || 1) <= 1) {
+        return;
+      }
+      last = { x: event.clientX, y: event.clientY };
+      svg.setPointerCapture?.(event.pointerId);
+    });
+    wrap.addEventListener("pointermove", (event) => {
+      const svg = this.querySelector(".map-slot svg");
+      if (!last || !svg || !this._mapRender?.width) {
+        return;
+      }
+      const rect = svg.getBoundingClientRect();
+      const zoom = this._zoom || 1;
+      // The viewBox is letterboxed, so one screen pixel is the larger ratio.
+      const scale = Math.max(
+        this._mapRender.width / zoom / rect.width,
+        this._mapRender.height / zoom / rect.height
+      );
+      this._panMap((last.x - event.clientX) * scale, (last.y - event.clientY) * scale);
+      last = { x: event.clientX, y: event.clientY };
+    });
+    const stop = () => {
+      last = null;
+    };
+    wrap.addEventListener("pointerup", stop);
+    wrap.addEventListener("pointercancel", stop);
+    wrap.addEventListener("keydown", (event) => {
+      const step = 30 / (this._zoom || 1);
+      const moves = {
+        ArrowLeft: [-step, 0],
+        ArrowRight: [step, 0],
+        ArrowUp: [0, -step],
+        ArrowDown: [0, step],
+      };
+      const move = moves[event.key];
+      if (!move || event.target !== wrap || (this._zoom || 1) <= 1) {
+        return;
+      }
+      event.preventDefault();
+      this._panMap(...move);
+    });
+  }
+}
+
+if (!customElements.get("ecovacs-goat-card-v2")) {
+  customElements.define("ecovacs-goat-card-v2", EcovacsGoatCardV2);
+
+  window.customCards = window.customCards || [];
+  window.customCards.push({
+    type: "ecovacs-goat-card-v2",
+    name: "Ecovacs GOAT Card v2",
+    description:
+      "Mower controls with a zoomable live map, a cut-direction slider, automatic entity setup and a confirmation before ending a job.",
+  });
+}

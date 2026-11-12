@@ -110,6 +110,25 @@ stop_button: button.mower_end_mowing
 name: Mower
 ```
 
+### Card v2
+
+**Ecovacs GOAT Card v2** is a second card type served from the same file. It needs only the mower entity and finds the battery, area, progress, error, map, cut-direction and end-mowing entities on the same device (set any of them explicitly to override, or to `""` to hide that part).
+
+```yaml
+type: custom:ecovacs-goat-card-v2
+entity: lawn_mower.mower
+```
+
+Compared with the original card it:
+
+- shows `Entity not found: …` when a configured entity does not exist;
+- asks for a second tap before **End** cancels the job;
+- adds map zoom, drag-to-pan and a **Follow mower** toggle;
+- adds a cut-direction slider next to the presets;
+- names the keepalive button **Live map** (same 10 minute live-map session);
+- keeps keyboard focus across state updates, shows focus outlines and respects the reduced-motion setting;
+- translates its labels to German, French and Dutch (English otherwise).
+
 ## How It Behaves
 
 The integration tries to be conservative with the mower and cloud connection:
