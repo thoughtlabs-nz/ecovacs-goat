@@ -227,6 +227,7 @@ class EcovacsMowerApi:
         self._country = country.upper()
         self._device_id = device_id
         self._continent = country_continent(self._country)
+        self._data_center = continent_data_center(self._continent)
         self._credentials: Credentials | None = None
         self._account_session = account_session
         self._account_session_update_callback = account_session_update_callback
@@ -250,6 +251,11 @@ class EcovacsMowerApi:
     def continent(self) -> str:
         """Return ECOVACS continent key."""
         return self._continent
+
+    @property
+    def data_center(self) -> str:
+        """Return ECOVACS data-center key used in dc-scoped hostnames."""
+        return self._data_center
 
     @property
     def client_device_id(self) -> str:
@@ -453,7 +459,7 @@ class EcovacsMowerApi:
         sst = await self._sst_token(device)
         request_id = uuid4().hex
         payload = app_payload(data)
-        url = f"https://api-ngiot.dc-{self._continent}.ww.ecouser.net/api/iot/endpoint/control"
+        url = f"https://api-ngiot.dc-{self._data_center}.ww.ecouser.net/api/iot/endpoint/control"
         params = {
             "si": request_id,
             "ct": "q",
@@ -565,7 +571,7 @@ class EcovacsMowerApi:
             return cached
 
         credentials = await self.authenticate()
-        url = f"https://api-base.dc-{self._continent}.ww.ecouser.net/api/new-perm/token/sst/issue"
+        url = f"https://api-base.dc-{self._data_center}.ww.ecouser.net/api/new-perm/token/sst/issue"
         body = {
             "acl": [
                 {
@@ -933,3 +939,10 @@ def country_continent(country: str) -> str:
     if country in EU_COUNTRIES:
         return "eu"
     return "ww"
+
+
+def continent_data_center(continent: str) -> str:
+    """Return the data-center key for dc-scoped hosts (api-base.dc-*, jmq-ngiot-*)."""
+    # There is no dc-ww host: the ww aliases (api-base.ww, mq-ww, portal-ww)
+    # resolve to the same addresses as their na counterparts.
+    return "na" if continent == "ww" else continent

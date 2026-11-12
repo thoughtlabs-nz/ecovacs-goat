@@ -187,7 +187,7 @@ class MowerAppPresenceMqttClient:
         client.on_message = self._on_message
         self._client = client
 
-        host = f"jmq-ngiot-{self._api.continent}.dc.robotww.ecouser.net"
+        host = f"jmq-ngiot-{self._api.data_center}.dc.robotww.ecouser.net"
         port = 443
         _LOGGER.info(
             "Starting ECOVACS app-presence MQTT session host=%s client_id=%s",
